@@ -1,0 +1,101 @@
+name: Publish
+
+# Publishing is triggered by cutting a GitHub Release, not by pushing to master.
+# The npm side is configured for trusted publishing: this workflow exchanges its
+# GitHub OIDC identity for a short-lived registry token, so no npm token and no
+# 2FA prompt is involved. That only works once the package points at this
+# repository and this workflow filename in the npm settings.
+#
+# There is no build step. The published artifact is the TypeScript source, which
+# is deliberate: this is a terminal-only plugin and OpenCode runs on Bun, which
+# executes TypeScript directly. A tsc build would also have to compile the Solid
+# JSX in src/tui.tsx, and `jsx: preserve` in tsconfig.json means tsc emits .jsx
+# that nothing here runs.
+#
+# Sequence for a release:
+#   1. bump the version in package.json and commit
+#   2. git tag -a v<version> -m "v<version>" && git push origin master --follow-tags
+#   3. gh release create v<version> --generate-notes
+#
+# The release job checks that the tag and the package version agree, so a
+# mismatched tag fails here instead of publishing a wrong version.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  # Required for trusted publishing: npm reads this OIDC token to mint a
+  # registry token scoped to this one workflow. Nothing else may hold it.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.x
+          registry-url: 'https://registry.npmjs.org'
+          # npm's trusted-publishing guidance is explicit about this: never cache
+          # in a release build.
+          cache: ''
+
+      # Trusted publishing needs npm >= 11.5.1, which is what performs the OIDC
+      # exchange. ubuntu-latest ships an older npm, so upgrade explicitly
+      # rather than depending on the runner image.
+      - name: Ensure npm supports OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - run: npm ci
+
+      - name: Verify the tag matches package.json
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "package.json: $version"
+          echo "release tag:   $TAG"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::release tag $TAG does not match package.json version $version"
+            exit 1
+          fi
+
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Confirm the published artifact carries the runtime entrypoint
+        run: |
+          # OpenCode resolves a path-based plugin's terminal entry by looking for
+          # <plugin-dir>/tui, and ignores the exports map for those. A tarball
+          # missing tui.ts would install cleanly and then silently do nothing,
+          # so assert the packed contents rather than trusting the files list.
+          npm pack --dry-run --json > pack.json
+          node -e "
+            const files = require('./pack.json')[0].files.map(f => f.path);
+            const required = ['tui.ts', 'index.ts', 'src/tui.tsx', 'src/question.ts'];
+            const missing = required.filter(f => !files.includes(f));
+            if (missing.length) {
+              console.error('::error::missing from tarball: ' + missing.join(', '));
+              process.exit(1);
+            }
+            const leaked = files.filter(f => /\.test\.tsx?$/.test(f));
+            if (leaked.length) {
+              console.error('::error::test files in tarball: ' + leaked.join(', '));
+              process.exit(1);
+            }
+            console.log('tarball OK: ' + files.length + ' files, no tests, tui entry present');
+          "
+
+      # No NODE_AUTH_TOKEN and no npm login here, by design. The id-token
+      # permission above lets the npm CLI (11.5.1+) exchange this job's OIDC
+      # identity for a short-lived registry token. Any NODE_AUTH_TOKEN in the
+      # environment would take precedence and break that exchange.
+      #
+      # No --provenance either: npm attaches the attestation automatically when
+      # the publish is authenticated by OIDC, from a public repository, for a
+      # public package. All three hold here.
+      - run: npm publish

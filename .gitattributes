@@ -1,0 +1,9 @@
+# This package publishes TypeScript source rather than a build, so the line
+# endings in the working tree are what npm ships. core.autocrlf=true is set
+# globally on this machine, which would otherwise turn the LF sources into CRLF
+# on checkout. Keep LF everywhere.
+* text=auto eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.md text eol=lf
+*.json text eol=lf
