@@ -107,10 +107,14 @@ not recognise.
 
 The plugin then:
 
-1. starts a deadline on `form.created`,
-2. draws the clock into the `session.composer.top` slot,
+1. starts a deadline on `form.created`, for questions raised by a session this window owns,
+2. draws the clock into the `session.composer.top` slot, for the question actually on screen,
 3. cancels on `form.replied` / `form.cancelled`,
 4. on expiry, replies with the first option of every answerable field.
+
+Steps 1 and 2 are scoped differently on purpose. A background tab's question is timed
+but not drawn, and a question in a session this window does not own is neither — see
+[Multiple TUI windows](#multiple-tui-windows).
 
 ### Why the clock renders where it does
 
@@ -158,8 +162,38 @@ If a form has nothing answerable, no request is sent at all.
   requires a timeout inside the tool itself, not a plugin.
 - **The clock lives in the TUI process.** Closing the terminal leaves the server-side
   form pending until it is garbage collected.
-- **Multiple TUI instances** each run their own timer. The already-settled handling
-  keeps this correct, though more than one instance may show a toast.
+- **Only the sessions a window owns get a clock.** The server's event feed is global,
+  so a `form.created` reaches every TUI on the server. This plugin admits a question
+  only when the session is on screen in this window or open in one of its background
+  tabs; a question belonging to a session this window knows nothing about is left to
+  whichever window is showing it. See below.
+
+## Multiple TUI windows
+
+The countdown is scoped to the window raising it. Two windows open on different
+sessions each time only their own questions, and a countdown never appears above an
+unrelated prompt.
+
+The scoping exists because of a specific hazard rather than tidiness. `form.created`
+is broadcast server-wide, so a plugin that reacted to every event would have each
+window counting down — and settling — the other windows' questions. Cancelling a
+clock is driven by a keystroke, and a keystroke is process-local: the window you are
+not looking at cannot hear you press `↓`, so it would count down and answer a question
+you were in the middle of reading. A stall is recoverable; a silent wrong answer is
+not.
+
+Two cases are deliberately still covered:
+
+- **A subagent's question** is timed from its root session's view, which is where the
+  host draws the prompt for it.
+- **A background tab's question** is timed even though no prompt is rendered for it.
+  That session is blocked and you are demonstrably not reading it, so it is exactly
+  the unattended run the timeout exists for. The clock runs silently; the moment you
+  switch to that tab the countdown appears, and your first keystroke cancels it.
+
+If the same session is open in two windows at once, both will count it down. The
+first reply wins and the already-settled handling keeps that correct, but both
+windows may show a toast.
 
 ## Development
 

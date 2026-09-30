@@ -1,4 +1,5 @@
-import { createSignal, onCleanup, onMount, Show, type Accessor } from "solid-js"
+import { createMemo, createSignal, onCleanup, onMount, Show, type Accessor } from "solid-js"
+import { createStore, produce, type Store } from "solid-js/store"
 import { Plugin } from "@opencode/plugin/tui"
 
 import {
@@ -37,6 +38,20 @@ import {
  * composer, so the clock stays visible in every one of those states, including
  * the narrow-terminal layout. `prompt.footer.status` would not work: the
  * composer is unmounted while a form is pending, so that slot never renders.
+ *
+ * Why it only times the questions it owns
+ * ---------------------------------------
+ * The server's event feed is global. `form.created` reaches every TUI connected
+ * to the server, whatever session raised it, so a plugin that adopts whatever
+ * arrives would have each window timing — and answering — the other windows'
+ * questions. That second half is the dangerous one: the keystroke that cancels
+ * the clock is process-local, so a window the user is not looking at would count
+ * down and settle a question they are in the middle of reading.
+ *
+ * So a form is admitted only when this TUI owns its session — the one on screen
+ * or one open in a background tab here (see `ownedSessions`). A question
+ * belonging to a session this window knows nothing about is left to whichever
+ * window is showing it.
  *
  * Why the timeout is safe
  * -----------------------
@@ -102,18 +117,97 @@ type Tracked = {
   choice: string
   /** The `generation` this entry was opened under. */
   generation: number
+  /**
+   * False once the clock has fired and the reply is in flight.
+   *
+   * The entry stays in the record until that reply settles so the notice and the
+   * keymap can tell "still counting down" from "already answered, waiting on the
+   * server" — and so a losing race can be recognised by identity when it lands.
+   */
+  armed: boolean
 }
 
-function Notice(props: { context: Plugin.Context; tracked: Accessor<Tracked | undefined>; now: Accessor<number> }) {
+/** Tracked entries by the session that owns the form. */
+type TrackedBySession = Store<Record<string, Tracked | undefined>>
+
+/**
+ * The sessions whose forms the host is willing to prompt for, in the order it
+ * walks them.
+ *
+ * This mirrors the `forms` memo in `packages/tui/src/routes/session/index.tsx`
+ * exactly, and it has to: the server's event feed is global, so every TUI
+ * connected to the same server sees every `form.created` no matter which session
+ * raised it. Without an explicit owner set, each instance would start a clock —
+ * and answer — questions raised in sessions it is not showing.
+ *
+ * Two cases carry over from the host and are deliberate:
+ *
+ * - A subagent's own view shows nothing but global elicitations, so it gets an
+ *   empty set. Its questions are prompted from the root session's view, and that
+ *   is where they get timed.
+ * - The `global` bucket is MCP elicitation, which never carries the question tag,
+ *   so it is left out. Including it would change nothing and cost a lookup.
+ */
+function promptedSessions(context: Plugin.Context, sessionID: string): ReadonlyArray<string> {
+  if (context.data.session.get(sessionID)?.parentID) return []
+  const family = context.data.session.family(sessionID)
+  return [sessionID, ...family.filter((id) => id !== sessionID)]
+}
+
+/**
+ * The sessions whose questions this TUI takes responsibility for.
+ *
+ * Wider than the one on screen on purpose. A session open in a background tab
+ * has no prompt rendered for it, so nothing in this process would otherwise ever
+ * rescue it — yet it is exactly the unattended run the timeout exists for, and
+ * the user is demonstrably not reading it. Owning it here is also safe: the
+ * moment the user switches to that tab the form prompt appears, the keymap layer
+ * below goes live, and their first keystroke cancels the clock.
+ *
+ * Sessions belonging to no tab here and not on screen are left alone. Another
+ * window is showing them, and answering over someone who is mid-read is the one
+ * outcome worse than a stall.
+ */
+function ownedSessions(context: Plugin.Context): ReadonlySet<string> {
+  const route = context.ui.router.current()
+  const owned = new Set<string>()
+  if (route.type === "session") for (const id of promptedSessions(context, route.sessionID)) owned.add(id)
+  for (const tab of context.ui.tabs.list()) for (const id of promptedSessions(context, tab.sessionID)) owned.add(id)
+  return owned
+}
+
+/**
+ * The question on screen, or undefined when nothing is being timed.
+ *
+ * The host prompts one form at a time and takes the first of that list, so the
+ * clock has to name the same one — a countdown for a question the user cannot
+ * see is worse than no countdown. This is deliberately narrower than
+ * `ownedSessions`: a background tab's clock runs, but its notice does not
+ * appear until the user actually goes there.
+ */
+function displayed(
+  context: Plugin.Context,
+  tracked: TrackedBySession,
+  sessionID: string | undefined,
+): Tracked | undefined {
+  if (sessionID === undefined) return undefined
+  for (const id of promptedSessions(context, sessionID)) {
+    const entry = tracked[id]
+    if (entry?.armed) return entry
+  }
+  return undefined
+}
+
+function Notice(props: { context: Plugin.Context; entry: Accessor<Tracked | undefined>; now: Accessor<number> }) {
   const context = props.context
   return (
-    <Show when={props.tracked()}>
+    <Show when={props.entry()}>
       <box flexDirection="row" gap={1} flexShrink={0}>
         <text fg={context.theme.text.feedback.warning.base} wrapMode="none">
-          {`⏱ ${secondsLeft(props.tracked()!.deadline, props.now())}s`}
+          {`⏱ ${secondsLeft(props.entry()!.deadline, props.now())}s`}
         </text>
         <text fg={context.theme.text.muted} wrapMode="none">
-          {`后自动选择「${props.tracked()!.choice}」`}
+          {`后自动选择「${props.entry()!.choice}」`}
         </text>
       </box>
     </Show>
@@ -121,28 +215,37 @@ function Notice(props: { context: Plugin.Context; tracked: Accessor<Tracked | un
 }
 
 /**
- * Renders the clock and, on mount, adopts a question that was already pending
+ * Renders the clock and, on mount, adopts questions that were already pending
  * before the plugin loaded.
  *
  * `form.created` only fires for forms that open after the plugin is listening,
  * so a question raised during a TUI reload would otherwise sit untimed. The
- * store still holds it, and this component knows which session it is rendering
- * into, which is what keeps the adoption from claiming another session's form.
+ * store still holds it, so the mount pass picks it up. The scan covers every
+ * session this TUI owns rather than the one being rendered, which is what
+ * recovers a subagent's question and a background tab's.
+ *
+ * The notice itself stays scoped to the rendered session, so a recovery for a
+ * background tab starts a clock without drawing anything above the wrong prompt.
  */
 function Countdown(props: {
   context: Plugin.Context
   sessionID: string
-  tracked: Accessor<Tracked | undefined>
+  tracked: TrackedBySession
   now: Accessor<number>
   adopt: (form: Form) => void
 }) {
+  const entry = createMemo(() => displayed(props.context, props.tracked, props.sessionID))
   onMount(() => {
-    for (const form of props.context.data.session.form.list(props.sessionID) ?? []) {
-      props.adopt(form as unknown as Form)
-      break
+    // Every session this TUI owns, not just the one being rendered: a question
+    // already pending in a background tab has no prompt to re-trigger
+    // `form.created`, so this pass is the only thing that will time it.
+    for (const id of ownedSessions(props.context)) {
+      for (const form of props.context.data.session.form.list(id) ?? []) {
+        props.adopt(form as unknown as Form)
+      }
     }
   })
-  return <Notice context={props.context} tracked={props.tracked} now={props.now} />
+  return <Notice context={props.context} entry={entry} now={props.now} />
 }
 
 /**
@@ -174,16 +277,28 @@ function Countdown(props: {
  * also what keeps exactly one instance alive regardless of which session is on
  * screen.
  */
-function KeymapObserver(props: { context: Plugin.Context; tracked: Accessor<Tracked | undefined>; cancel: () => void }) {
+function KeymapObserver(props: {
+  context: Plugin.Context
+  tracked: TrackedBySession
+  cancel: (entry: Tracked) => void
+}) {
+  const entry = createMemo(() => {
+    const route = props.context.ui.router.current()
+    return displayed(props.context, props.tracked, route.type === "session" ? route.sessionID : undefined)
+  })
   props.context.keymap.layer(() => ({
     mode: FORM_MODE,
     priority: 100,
-    // Reactive: the layer is live only while a question is on the clock.
-    enabled: () => props.tracked() !== undefined,
+    // Reactive: the layer is live only while a question this TUI is showing is
+    // on the clock. A question in another session must not be cancellable from
+    // here — the keystroke would belong to a prompt that is not on screen.
+    enabled: () => entry() !== undefined,
     commands: INTERACTION_KEYS.map((key) => ({
       bind: key,
       run: () => {
-        props.cancel()
+        const current = entry()
+        if (current === undefined) return false
+        props.cancel(current)
         return false
       },
     })),
@@ -197,11 +312,8 @@ export default Plugin.define({
     const config = readConfig(context.options as Record<string, any> | undefined)
     if (config.timeout <= 0) return
 
-    const [tracked, setTracked] = createSignal<Tracked>()
+    const [tracked, setTracked] = createStore<Record<string, Tracked>>({})
     const [now, setNow] = createSignal(Date.now())
-
-    /** The form currently on the clock, or undefined. */
-    let current: Tracked | undefined
 
     /**
      * Monotonic counter identifying "the question the user is looking at now".
@@ -213,44 +325,49 @@ export default Plugin.define({
      */
     let generation = 0
 
-    /** Stop the clock without invalidating the generation, for our own expiry. */
-    const stop = () => {
-      current = undefined
-      setTracked(undefined)
-    }
+    /** Whether the record still holds the very entry a reply was sent for. */
+    const stillOurs = (entry: Tracked) => tracked[entry.form.sessionID]?.generation === entry.generation
 
-    /** Stop the clock and invalidate the pending question, for a user action. */
-    const clear = () => {
-      generation++
-      stop()
+    /** Drop an entry, but only while it is still the one we mean to drop. */
+    const release = (entry: Tracked) => {
+      if (!stillOurs(entry)) return
+      setTracked(
+        produce((draft) => {
+          delete draft[entry.form.sessionID]
+        }),
+      )
     }
 
     /**
      * Settle a question on the human's behalf.
      *
-     * `entry.generation` is captured before the request goes out and re-checked
-     * after it lands, so a timeout that loses the race stays silent instead of
-     * announcing an answer the user made themselves.
+     * The entry is re-checked by generation once the request lands, so a timeout
+     * that lost the race stays silent instead of announcing an answer the user
+     * made themselves. Either way the entry is released: the clock is spent
+     * whether the reply won or lost.
      */
     const answer = (entry: Tracked) => {
-      const settled = entry.generation
       const reply = autoAnswer(entry.form)
       if (!reply) {
-        stop()
+        release(entry)
         return
       }
       void context.data.session.form
         .reply({ sessionID: entry.form.sessionID, formID: entry.form.id, answer: reply })
         .then(() => {
-          if (generation !== settled) return
+          const won = stillOurs(entry)
+          release(entry)
+          if (!won) return
           if (!config.notify) return
           context.ui.toast.show({
+            sessionID: entry.form.sessionID,
             title: "Question timed out",
             message: `已自动选择「${entry.choice}」`,
             variant: "warning",
           })
         })
         .catch(() => {
+          release(entry)
           // Already-settled and not-found are swallowed by the client, so
           // reaching here is a genuine failure: the form is still pending on the
           // server and the user can still answer it by hand. The clock has
@@ -259,40 +376,68 @@ export default Plugin.define({
         })
     }
 
-    // The clock is a single interval for the whole plugin rather than a timer
-    // per form. Forms are strictly one-at-a-time per session and a new
-    // `form.created` simply restarts it, so a per-form timer would only add
-    // handles to clean up.
+    // One interval drives every tracked question rather than a timer per entry.
+    // A new `form.created` inserts into the record instead of restarting
+    // anything, so there is nothing per-form to schedule here.
     const ticker = setInterval(() => {
-      const entry = current
-      if (!entry) return
       const stamp = Date.now()
-      setNow(stamp)
-      if (stamp < entry.deadline) return
-      // Expiry is our own action, so `stop()` rather than `clear()`: the reply
-      // below is still the current generation and is allowed to announce itself.
-      stop()
-      answer(entry)
+      let counting = false
+      for (const sessionID of Object.keys(tracked)) {
+        const entry = tracked[sessionID]
+        if (!entry?.armed) continue
+        if (stamp < entry.deadline) {
+          counting = true
+          continue
+        }
+        // Disarm rather than release: the entry has to stay in the record so
+        // `answer` can recognise it when the reply lands.
+        setTracked(sessionID, "armed", false)
+        answer(entry)
+      }
+      if (counting) setNow(stamp)
     }, TICK_MS)
     onCleanup(() => clearInterval(ticker))
 
     /**
-     * Put a form on the clock, if it is a question we can actually answer.
+     * Put a form on the clock, if it is a question we can actually answer and
+     * this TUI owns the session that raised it.
      *
      * Shared by the event path and the mount-time recovery path, so both apply
-     * the same tag filter and the same "nothing to pick" bail-out.
+     * the same ownership check, tag filter and "nothing to pick" bail-out.
      */
     const adopt = (form: Form) => {
-      if (current) return
+      if (!ownedSessions(context).has(form.sessionID)) return
       if (!isQuestionForm(form)) return
       const choice = describeAutoAnswer(form)
       if (!choice) return
-      // A new question supersedes whatever was on the clock, including any
-      // reply of ours that is still in flight.
-      const entry: Tracked = { form, deadline: Date.now() + config.timeout, choice, generation: ++generation }
-      current = entry
-      setTracked(entry)
+      // Re-seeing a form that is already on the clock keeps its original
+      // deadline. This is what a session switch or a plugin reload looks like:
+      // without this the countdown would silently restart at the full timeout
+      // every time the user navigated back to a pending question.
+      if (tracked[form.sessionID]?.form.id === form.id) return
+      // A new question supersedes whatever was on the clock for that session,
+      // including a reply of ours that is still in flight.
+      const entry: Tracked = {
+        form,
+        deadline: Date.now() + config.timeout,
+        choice,
+        generation: ++generation,
+        armed: true,
+      }
+      setTracked(form.sessionID, entry)
       setNow(Date.now())
+    }
+
+    /** Forget a form the user settled, wherever in the record it sits. */
+    const forget = (formID: string) => {
+      for (const sessionID of Object.keys(tracked)) {
+        if (tracked[sessionID]?.form.id !== formID) continue
+        setTracked(
+          produce((draft) => {
+            delete draft[sessionID]
+          }),
+        )
+      }
     }
 
     const unsubscribes = [
@@ -306,23 +451,17 @@ export default Plugin.define({
       // The human answered, or the form was dismissed: stop the clock so a
       // stale deadline cannot reply to a form the user has already settled.
       context.data.on("form.replied", (event) => {
-        if (current?.form.id === event.data.id) clear()
+        forget(event.data.id)
       }),
       context.data.on("form.cancelled", (event) => {
-        if (current?.form.id === event.data.id) clear()
+        forget(event.data.id)
       }),
     ]
 
     const offSlot = context.ui.slot({
       append: "session.composer.top",
       render: (input) => (
-        <Countdown
-          context={context}
-          sessionID={input.sessionID}
-          tracked={tracked}
-          now={now}
-          adopt={adopt}
-        />
+        <Countdown context={context} sessionID={input.sessionID} tracked={tracked} now={now} adopt={adopt} />
       ),
     })
 
@@ -334,7 +473,7 @@ export default Plugin.define({
     const offKeymapSlot = config.cancelOnInteraction
       ? context.ui.slot({
           append: "app",
-          render: () => <KeymapObserver context={context} tracked={tracked} cancel={clear} />,
+          render: () => <KeymapObserver context={context} tracked={tracked} cancel={release} />,
         })
       : undefined
 
