@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { createMemo, createSignal, onCleanup, onMount, Show, type Accessor } from "solid-js"
 import { createStore, produce, type Store } from "solid-js/store"
 import { Plugin } from "@opencode/plugin/tui"

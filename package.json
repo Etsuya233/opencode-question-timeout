@@ -43,22 +43,13 @@
     "countdown",
     "automation"
   ],
+  "dependencies": {
+    "@opencode/plugin": ">=2.0.18"
+  },
   "peerDependencies": {
-    "@opencode/plugin": ">=2.0.18",
     "@opentui/core": ">=0.5.8",
     "@opentui/solid": ">=0.5.8",
     "solid-js": ">=1.9.0"
-  },
-  "peerDependenciesMeta": {
-    "@opentui/core": {
-      "optional": true
-    },
-    "@opentui/solid": {
-      "optional": true
-    },
-    "solid-js": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@opencode/plugin": "^2.0.18",
