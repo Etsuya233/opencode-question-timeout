@@ -203,14 +203,16 @@ function Notice(props: { context: Plugin.Context; entry: Accessor<Tracked | unde
   const context = props.context
   return (
     <Show when={props.entry()}>
-      <box flexDirection="row" gap={1} flexShrink={0}>
-        <text fg={context.theme.text.feedback.warning.base} wrapMode="none">
-          {`⏱ ${secondsLeft(props.entry()!.deadline, props.now())}s`}
-        </text>
-        <text fg={context.theme.text.muted} wrapMode="none">
-          {`后自动选择「${props.entry()!.choice}」`}
-        </text>
-      </box>
+      {(entry: Accessor<Tracked>) => (
+        <box flexDirection="row" gap={1} flexShrink={0}>
+          <text fg={context.theme.text.feedback.warning.base} wrapMode="none">
+            {`⏱ ${secondsLeft(entry().deadline, props.now())}s`}
+          </text>
+          <text fg={context.theme.text.muted} wrapMode="none">
+            {`后自动选择「${entry().choice}」`}
+          </text>
+        </box>
+      )}
     </Show>
   )
 }
