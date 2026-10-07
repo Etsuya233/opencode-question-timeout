@@ -6,16 +6,18 @@ name: Publish
 # 2FA prompt is involved. That only works once the package points at this
 # repository and this workflow filename in the npm settings.
 #
-# There is no build step. The published artifact is the TypeScript source, which
-# is deliberate: this is a terminal-only plugin and OpenCode runs on Bun, which
-# executes TypeScript directly. A tsc build would also have to compile the Solid
-# JSX in src/tui.tsx, and `jsx: preserve` in tsconfig.json means tsc emits .jsx
-# that nothing here runs.
+# The published artifact includes `dist/`, the precompiled JSX. OpenCode's TUI
+# only runs its Solid Babel transform on plugin sources outside `node_modules`,
+# so raw `.tsx` in an npm/git install is compiled with Bun's default JSX and
+# every reactive JSX prop freezes at its initial value. `npm run build`
+# (mirrored by `prepublishOnly`) regenerates `dist/` from `src/`, and the job
+# fails if the committed output is stale.
 #
 # Sequence for a release:
 #   1. bump the version in package.json and commit
-#   2. git tag -a v<version> -m "v<version>" && git push origin master --follow-tags
-#   3. gh release create v<version> --generate-notes
+#   2. npm run build && commit dist if it changed
+#   3. git tag -a v<version> -m "v<version>" && git push origin master --follow-tags
+#   4. gh release create v<version> --generate-notes
 #
 # The release job checks that the tag and the package version agree, so a
 # mismatched tag fails here instead of publishing a wrong version.
@@ -51,6 +53,9 @@ jobs:
         run: npm install -g npm@latest
 
       - run: npm ci
+      - run: npm run build
+      - name: Confirm the committed dist matches the sources
+        run: git diff --exit-code -- dist
 
       - name: Verify the tag matches package.json
         env:
@@ -72,11 +77,12 @@ jobs:
           # OpenCode resolves a path-based plugin's terminal entry by looking for
           # <plugin-dir>/tui, and ignores the exports map for those. A tarball
           # missing tui.ts would install cleanly and then silently do nothing,
-          # so assert the packed contents rather than trusting the files list.
+          # and the entrypoint needs the precompiled dist/tui.js beside it, so
+          # assert the packed contents rather than trusting the files list.
           npm pack --dry-run --json > pack.json
           node -e "
             const files = require('./pack.json')[0].files.map(f => f.path);
-            const required = ['tui.ts', 'index.ts', 'src/tui.tsx', 'src/question.ts'];
+            const required = ['tui.ts', 'index.ts', 'dist/tui.js', 'dist/question.js'];
             const missing = required.filter(f => !files.includes(f));
             if (missing.length) {
               console.error('::error::missing from tarball: ' + missing.join(', '));

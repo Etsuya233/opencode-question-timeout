@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@etsuya/opencode-question-timeout",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Shows a countdown on the OpenCode V2 question prompt and auto-answers with the first option when it runs out, so a long unattended run cannot stall on a question.",
   "license": "MIT",
   "type": "module",
@@ -20,16 +20,15 @@
   "files": [
     "index.ts",
     "tui.ts",
-    "src",
-    "!src/*.test.ts",
-    "!src/*.test.tsx",
+    "dist",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test src/question.test.ts",
-    "prepublishOnly": "npm run typecheck && npm test"
+    "prepublishOnly": "npm run build && npm run typecheck && npm test"
   },
   "publishConfig": {
     "access": "public"
@@ -52,10 +51,13 @@
     "solid-js": ">=1.9.0"
   },
   "devDependencies": {
+    "@babel/core": "^7.28.0",
+    "@babel/preset-typescript": "^7.27.1",
     "@opencode/plugin": "^2.0.18",
     "@opentui/core": "^0.5.12",
     "@opentui/solid": "^0.5.12",
     "@types/node": "^24.0.0",
+    "babel-preset-solid": "^1.9.12",
     "solid-js": "^1.9.0",
     "typescript": "^5.7.0"
   }

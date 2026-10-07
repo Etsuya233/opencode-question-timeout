@@ -19,17 +19,25 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - run: npm run build
+      - name: Confirm the committed dist matches the sources
+        # git/npm installs load dist/tui.js directly (raw .tsx under
+        # node_modules never gets OpenCode's Solid Babel transform), so a
+        # stale dist would ship frozen JSX. Rebuild and require no diff.
+        run: git diff --exit-code -- dist
       - run: npm run typecheck
       - run: npm test
       - name: Confirm the packed tarball carries the terminal entrypoint
         run: |
           # OpenCode resolves a path-based plugin by looking for <plugin-dir>/tui
           # and ignores the exports map, so a tarball missing tui.ts would install
-          # cleanly and then render nothing. Assert the packed contents.
+          # cleanly and then render nothing. The entrypoint re-exports the
+          # precompiled dist/tui.js, which must be present too. Assert the packed
+          # contents.
           npm pack --dry-run --json > pack.json
           node -e "
             const files = require('./pack.json')[0].files.map(f => f.path);
-            const required = ['tui.ts', 'index.ts', 'src/tui.tsx', 'src/question.ts'];
+            const required = ['tui.ts', 'index.ts', 'dist/tui.js', 'dist/question.js'];
             const missing = required.filter(f => !files.includes(f));
             if (missing.length) {
               console.error('::error::missing from tarball: ' + missing.join(', '));
