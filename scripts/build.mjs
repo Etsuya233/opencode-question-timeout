@@ -24,6 +24,13 @@
  * it came from a path or from `node_modules`.
  *
  * `dist/` is committed so a `github:`/npm install needs no build step.
+ *
+ * Name note: the package script is `compile`, not `build`, on purpose. pacote
+ * runs an npm install inside the git checkout when the package declares any of
+ * build/preinstall/install/postinstall/prepack/prepare, and OpenCode's embedded
+ * npm cannot prepare git dependencies on some installs (its
+ * `/$bunfs/bin/npm-cli.js` self-spawn exits with help). Keeping the script out
+ * of that set lets a git install consume the committed dist directly.
  */
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises"
 import { dirname, join, relative } from "node:path"

@@ -12,7 +12,7 @@
  * so an npm/git install of raw `.tsx` is compiled by Bun's default JSX
  * transform and every reactive expression in the render tree freezes at its
  * initial value — the countdown would load, reply on time, and never draw.
- * `dist/` is built by `npm run build` and committed so git installs need no
+ * `dist/` is built by `npm run compile` and committed so git installs need no
  * build step. See `scripts/build.mjs` for the full explanation.
  */
 export { default } from "./dist/tui.js"

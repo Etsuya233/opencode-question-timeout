@@ -19,7 +19,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm run build
+      - run: npm run compile
       - name: Confirm the committed dist matches the sources
         # git/npm installs load dist/tui.js directly (raw .tsx under
         # node_modules never gets OpenCode's Solid Babel transform), so a

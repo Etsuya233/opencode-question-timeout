@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@etsuya/opencode-question-timeout",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Shows a countdown on the OpenCode V2 question prompt and auto-answers with the first option when it runs out, so a long unattended run cannot stall on a question.",
   "license": "MIT",
   "type": "module",
@@ -25,10 +25,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "compile": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test src/question.test.ts",
-    "prepublishOnly": "npm run build && npm run typecheck && npm test"
+    "prepublishOnly": "npm run compile && npm run typecheck && npm test"
   },
   "publishConfig": {
     "access": "public"
