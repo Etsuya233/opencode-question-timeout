@@ -36,7 +36,10 @@ jobs:
           # contents.
           npm pack --dry-run --json > pack.json
           node -e "
-            const files = require('./pack.json')[0].files.map(f => f.path);
+            const parsed = require('./pack.json');
+            // npm 12 reports an object keyed by package name; npm 11 an array.
+            const entry = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
+            const files = entry.files.map(f => f.path);
             const required = ['tui.ts', 'index.ts', 'dist/tui.js', 'dist/question.js'];
             const missing = required.filter(f => !files.includes(f));
             if (missing.length) {
